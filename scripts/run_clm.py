@@ -695,7 +695,14 @@ def main():
         trainer.add_callback(FirstNBatchesEveryEpochProfiler(prof))
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
-        prof.destroy_process_group()
+        try:
+            prof.stop()
+        except Exception:
+            pass
+        
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+            torch.distributed.destroy_process_group()
 
         metrics = train_result.metrics
 

@@ -23,3 +23,9 @@ sbatch run_generate.slurm
 `run_generate.slurm` For inference in slurm cluster once model is trained, specify the model directory
 `run_gpt2_multi_node.slurm` To run data parallel in 2 nodes with 1 GPU each
 `run_gpt2_single_gpu.slurm` Single GPU single node
+
+## View profiler result
+```bash
+pip install tensorboard torch_tb_profiler
+torchboard --logdir=profiler
+```
