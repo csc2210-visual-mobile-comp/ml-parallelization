@@ -1,0 +1,7 @@
+.venv
+shakespeare.txt
+out-gpt2-shakespeare
+out-gpt2-dp
+logs
+profiler
+utils_scripts
