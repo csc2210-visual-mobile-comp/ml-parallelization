@@ -80,7 +80,7 @@ MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 class FirstNBatchesEveryEpochProfiler(TrainerCallback):
-    def __init__(self, profiler, start_batch=2, end_batch=5):
+    def __init__(self, profiler, start_batch=2, end_batch=12):
         self.profiler = profiler
         self.start_batch = start_batch
         self.end_batch = end_batch
@@ -685,16 +685,17 @@ def main():
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
 
-        with torch.profiler.profile(
+        prof = torch.profiler.profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             schedule=torch.profiler.schedule(wait=0, warmup=0, active=999),
             on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler"),
             record_shapes=True,
             profile_memory=True,
-        ) as prof:
-            trainer.add_callback(FirstNBatchesEveryEpochProfiler(prof, start_batch=2, end_batch=6))
-            train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        )
+        trainer.add_callback(FirstNBatchesEveryEpochProfiler(prof))
+        train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
+        prof.destroy_process_group()
 
         metrics = train_result.metrics
 
