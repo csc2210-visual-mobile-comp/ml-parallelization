@@ -5,3 +5,5 @@ out-gpt2-dp
 logs
 profiler
 utils_scripts
+huggingface
+triton_cache
