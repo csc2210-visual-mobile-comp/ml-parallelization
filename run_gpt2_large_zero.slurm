@@ -49,6 +49,6 @@ srun --label torchrun \
   --weight_decay 0.01 \
   --fp16 \
   --logging_steps 50 \
-  --deepspeed config/zero_opt.json \
+  --deepspeed configs/zero_opt.json \
   --output_dir out-gpt2-dp \
   --overwrite_output_dir
