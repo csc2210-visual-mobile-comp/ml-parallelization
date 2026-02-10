@@ -81,6 +81,45 @@ logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
+def debug_dist_state(tag=""):
+    import os
+    import socket
+    import torch.distributed as dist
+
+    hostname = socket.gethostname()
+
+    env_keys = [
+        "RANK", "LOCAL_RANK", "WORLD_SIZE",
+        "SLURM_PROCID", "SLURM_LOCALID", "SLURM_NTASKS",
+        "MASTER_ADDR", "MASTER_PORT",
+    ]
+
+    env = {k: os.environ.get(k, None) for k in env_keys}
+
+    print(
+        f"\n[{tag}] HOST={hostname} "
+        f"PID={os.getpid()} "
+        f"ENV={env}",
+        flush=True,
+    )
+
+    if dist.is_available():
+        print(
+            f"[{tag}] torch.distributed available=True "
+            f"initialized={dist.is_initialized()}",
+            flush=True,
+        )
+        if dist.is_initialized():
+            print(
+                f"[{tag}] RANK={dist.get_rank()} "
+                f"WORLD_SIZE={dist.get_world_size()} "
+                f"BACKEND={dist.get_backend()}",
+                flush=True,
+            )
+    else:
+        print(f"[{tag}] torch.distributed available=False", flush=True)
+
+
 
 @dataclass
 class ModelArguments:
@@ -576,6 +615,7 @@ def main():
         model_parameters=model.parameters(),
         config=training_args.deepspeed,
     )
+    debug_dist_state()
 
     # ---- Training loop (Trainer removed) ----
     if training_args.do_train:
@@ -604,11 +644,11 @@ def main():
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             schedule=torch.profiler.schedule(wait=0, warmup=0, active=999),
             on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler"),
-            record_shapes=True,
-            profile_memory=True,
+            record_shapes=False,
+            profile_memory=False,
         )
 
-        prof_start_step = 2
+        prof_start_step = 10
         prof_end_step = 12
         prof_enabled = False
 
