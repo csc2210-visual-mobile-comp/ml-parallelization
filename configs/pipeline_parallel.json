@@ -1,17 +1,20 @@
 {
-  "train_batch_size": "auto",
-  "micro_batch_size_per_gpu": 2,
+  "train_micro_batch_size_per_gpu": 2,
+  "gradient_accumulation_steps": 4,
 
   "fp16": {
     "enabled": true
+  },
+
+  "pipeline": {
+    "enabled": true,
+    "stages": 2
   },
 
   "zero_optimization": {
     "stage": 1
   },
 
-  "pipeline": {
-    "stages": 2,
-    "activation_checkpoint_interval": 1
-  }
+  "steps_per_print": 50,
+  "wall_clock_breakdown": false
 }
