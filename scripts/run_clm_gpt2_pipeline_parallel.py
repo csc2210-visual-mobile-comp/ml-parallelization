@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import json
 import logging
 import os
 import sys
@@ -13,8 +14,6 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from datasets import IterableDataset, IterableDatasetDict, load_dataset
-from torch.profiler import ProfilerActivity
-
 import transformers
 from transformers import (
     CONFIG_MAPPING,
@@ -45,6 +44,18 @@ MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
 
+def env_default(dst: str, src: str):
+    # Only set dst from src if src exists (avoid KeyError outside Slurm)
+    if dst not in os.environ and src in os.environ:
+        os.environ[dst] = os.environ[src]
+
+
+# Slurm -> torch.distributed env mapping (safe)
+env_default("RANK", "SLURM_PROCID")
+env_default("WORLD_SIZE", "SLURM_NTASKS")
+env_default("LOCAL_RANK", "SLURM_LOCALID")
+
+
 def debug_dist_state(tag=""):
     import socket
     hostname = socket.gethostname()
@@ -55,7 +66,6 @@ def debug_dist_state(tag=""):
     ]
     env = {k: os.environ.get(k, None) for k in env_keys}
     print(f"\n[{tag}] HOST={hostname} PID={os.getpid()} ENV={env}", flush=True)
-
     print(f"[{tag}] dist_available={dist.is_available()} initialized={dist.is_initialized()}", flush=True)
     if dist.is_initialized():
         print(
@@ -87,14 +97,24 @@ def _is_main_process() -> bool:
     return (not dist.is_available()) or (not dist.is_initialized()) or dist.get_rank() == 0
 
 
+def load_ds_config(ds_cfg):
+    # training_args.deepspeed can be a path or a dict
+    if isinstance(ds_cfg, str):
+        with open(ds_cfg, "r") as f:
+            return json.load(f)
+    if isinstance(ds_cfg, dict):
+        return ds_cfg
+    raise TypeError(f"Unsupported deepspeed config type: {type(ds_cfg)}")
+
+
 # -----------------------
 # Pipeline conversion
 # -----------------------
-def make_gpt2_pipeline_module(hf_model, tie_embeddings=True):
+def make_gpt2_pipeline_module(hf_model, num_stages: int, tie_embeddings=True):
     """
     Convert HF GPT2LMHeadModel into a DeepSpeed PipelineModule.
-    Expects input from stage0 as (input_ids, attention_mask, labels).
-    Returns scalar loss (Finalize computes loss) for training.
+    Stage0 input: (input_ids, attention_mask, labels)
+    Last stage returns scalar loss (Finalize computes loss) for training.
     """
     gpt2 = hf_model.transformer
     wte = gpt2.wte
@@ -117,8 +137,21 @@ def make_gpt2_pipeline_module(hf_model, tie_embeddings=True):
             self.wpe = wpe
             self.drop = drop
 
-        def forward(self, inputs):
-            input_ids, attention_mask, labels = inputs
+        def forward(self, *inputs):
+            # DeepSpeed PP may call either:
+            # 1) forward(input_ids, attention_mask, labels)
+            # 2) forward((input_ids, attention_mask, labels))
+            if len(inputs) == 1:
+                input_ids, attention_mask, labels = inputs[0]
+            else:
+                if len(inputs) == 2:
+                    input_ids, attention_mask = inputs
+                    labels = None
+                elif len(inputs) == 3:
+                    input_ids, attention_mask, labels = inputs
+                else:
+                    raise ValueError(f"Embeddings expected 2 or 3 inputs, got {len(inputs)}")
+
             bsz, seqlen = input_ids.shape
             device = input_ids.device
 
@@ -129,7 +162,8 @@ def make_gpt2_pipeline_module(hf_model, tie_embeddings=True):
             if attention_mask is None:
                 attn = None
             else:
-                attn = (1.0 - attention_mask.float()) * -1e4
+                # convert [bsz, seqlen] -> [bsz, 1, 1, seqlen] with -inf on masked tokens
+                attn = (1.0 - attention_mask.to(x.dtype)) * (-1e4)
                 attn = attn[:, None, None, :]
 
             return (x, attn, labels)
@@ -172,9 +206,6 @@ def make_gpt2_pipeline_module(hf_model, tie_embeddings=True):
     for blk in blocks:
         layers.append(LayerSpec(GPT2BlockWrapper, blk))
     layers.append(LayerSpec(Finalize))
-
-    # Explicit num_stages = world_size makes behavior deterministic under Slurm
-    num_stages = dist.get_world_size() if dist.is_initialized() else 1
 
     pipe = PipelineModule(
         layers=layers,
@@ -250,14 +281,34 @@ def main():
     transformers.utils.logging.enable_default_handler()
     transformers.utils.logging.enable_explicit_format()
 
-    # IMPORTANT: init dist BEFORE building PipelineModule (we use world_size)
-    # Under Slurm, torch.distributed.run isn't used, so we must init here.
+    # Set CUDA device BEFORE initializing NCCL process group
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
+    # Init dist (MASTER_ADDR/PORT are provided by your sbatch script)
     if not dist.is_initialized():
         dist.init_process_group(backend="nccl", init_method="env://")
 
     debug_dist_state("startup")
-
     set_seed(training_args.seed)
+
+    if training_args.deepspeed is None:
+        raise ValueError("Pipeline parallel requires --deepspeed <config.json>")
+
+    ds_cfg = load_ds_config(training_args.deepspeed)
+
+    # Your DS config uses: "pipeline": {"enabled": true, "stages": 2}
+    pp_size = ds_cfg.get("pipeline", {}).get("stages", None) or ds_cfg.get("pipeline_parallel_size", None)
+    if pp_size is None:
+        raise ValueError("DeepSpeed config missing pipeline stages (pipeline.stages or pipeline_parallel_size).")
+
+    ws = dist.get_world_size()
+    if ws % int(pp_size) != 0:
+        raise ValueError(f"WORLD_SIZE={ws} must be divisible by pipeline stages={pp_size}.")
+
+    if _is_main_process():
+        print(f"Using pipeline stages (pp_size) = {pp_size} (WORLD_SIZE={ws})", flush=True)
 
     # --------------------
     # Load dataset(s)
@@ -443,9 +494,8 @@ def main():
         concatenated = {k: list(chain(*examples[k])) for k in examples}
         total_length = len(concatenated[list(examples.keys())[0]])
         total_length = (total_length // block_size) * block_size
-        result = {k: [t[i:i+block_size] for i in range(0, total_length, block_size)] for k, t in concatenated.items()}
+        result = {k: [t[i:i + block_size] for i in range(0, total_length, block_size)] for k, t in concatenated.items()}
         result["labels"] = result["input_ids"].copy()
-        # create attention mask (all ones; no padding in grouped blocks)
         result["attention_mask"] = [[1] * block_size for _ in range(len(result["input_ids"]))]
         return result
 
@@ -469,12 +519,9 @@ def main():
             train_dataset = train_dataset.select(range(min(len(train_dataset), data_args.max_train_samples)))
 
     # --------------------
-    # Build PipelineModule from HF model
+    # Build PipelineModule from HF model (USE pp_size, not world size!)
     # --------------------
-    pipe_model = make_gpt2_pipeline_module(hf_model, tie_embeddings=True)
-
-    if training_args.deepspeed is None:
-        raise ValueError("PP requires --deepspeed config with pipeline.enabled and pipeline.stages")
+    pipe_model = make_gpt2_pipeline_module(hf_model, num_stages=int(pp_size), tie_embeddings=True)
 
     # --------------------
     # DeepSpeed initialize
@@ -488,17 +535,17 @@ def main():
     is_pipe = isinstance(model_engine, PipelineEngine)
 
     if _is_main_process():
-        print(f"DeepSpeed engine type: {type(model_engine)}")
-        print(f"Pipeline enabled: {is_pipe}")
+        print(f"DeepSpeed engine type: {type(model_engine)}", flush=True)
+        print(f"Pipeline enabled: {is_pipe}", flush=True)
 
-    if is_pipe:
-        if _is_main_process():
-            print(
-                f"PP stage id={model_engine.stage_id} "
-                f"num_stages={model_engine.num_stages} "
-                f"is_first={model_engine.is_first_stage()} "
-                f"is_last={model_engine.is_last_stage()}"
-            )
+    if is_pipe and _is_main_process():
+        print(
+            f"PP stage id={model_engine.stage_id} "
+            f"num_stages={model_engine.num_stages} "
+            f"is_first={model_engine.is_first_stage()} "
+            f"is_last={model_engine.is_last_stage()}",
+            flush=True,
+        )
 
     # --------------------
     # Training loop (PipelineEngine)
@@ -506,47 +553,67 @@ def main():
     if training_args.do_train:
         from torch.utils.data import DataLoader
 
-        # Only FIRST stage loads data
+        def pp_collate(features):
+            batch = default_data_collator(features)
+            input_ids = batch["input_ids"].to(torch.long)
+            attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(torch.long)
+            labels = batch.get("labels", input_ids.clone()).to(torch.long)
+            # Important: Stage0 should yield a single item that matches Embeddings' len(inputs)==1 case
+            return ((input_ids, attention_mask, labels),)
+
+        # Only FIRST stage reads real data; others feed None
+        def dummy_data_iter():
+            while True:
+                yield None
+
         if is_pipe and model_engine.is_first_stage():
             train_dataloader = DataLoader(
                 train_dataset,
                 batch_size=training_args.per_device_train_batch_size,
-                shuffle=not data_args.streaming,
-                collate_fn=default_data_collator,
+                shuffle=(not data_args.streaming),
+                collate_fn=pp_collate,
                 drop_last=True,
             )
             data_iter = iter(train_dataloader)
         else:
             train_dataloader = None
-            data_iter = None
+            data_iter = dummy_data_iter()
+
+        # Compute total steps on GLOBAL rank 0, then broadcast to all
+        if dist.get_rank() == 0:
+            if not data_args.streaming:
+                if train_dataloader is None:
+                    total_steps = 0
+                else:
+                    total_steps = len(train_dataloader) * int(training_args.num_train_epochs)
+            else:
+                total_steps = training_args.max_steps if getattr(training_args, "max_steps", 0) > 0 else 1000
+        else:
+            total_steps = 0
+
+        total_steps_tensor = torch.tensor(total_steps, device=model_engine.device, dtype=torch.int64)
+        dist.broadcast(total_steps_tensor, src=0)
+        total_steps = int(total_steps_tensor.item())
+
+        if _is_main_process():
+            print(f"Total training steps = {total_steps}", flush=True)
 
         model_engine.train()
         total_loss = 0.0
-        steps = 0
+        steps_with_loss = 0
         start_time = time.time()
 
-        # estimate steps if dataset is sized; else just loop a fixed number of steps
-        if not data_args.streaming:
-            steps_per_epoch = len(train_dataloader) if train_dataloader is not None else 0
-            total_steps = steps_per_epoch * int(training_args.num_train_epochs)
-        else:
-            # streaming: you probably want max_train_steps; fallback
-            total_steps = getattr(training_args, "max_steps", 1000)
-            if total_steps <= 0:
-                total_steps = 1000
-
         for step in range(1, total_steps + 1):
-            # PipelineEngine handles forward/backward/step internally
             loss = model_engine.train_batch(data_iter=data_iter)
 
-            # loss is only meaningful on last stage; others may get None
+            # loss is only meaningful on last stage
             if loss is not None:
                 total_loss += float(loss)
-                steps += 1
+                steps_with_loss += 1
 
             if training_args.logging_steps and step % training_args.logging_steps == 0:
                 if _is_main_process():
-                    avg_loss = total_loss / max(1, steps)
+                    avg_loss = total_loss / max(1, steps_with_loss)
                     elapsed = time.time() - start_time
                     print(f"step={step} avg_loss={avg_loss:.4f} elapsed={elapsed:.1f}s", flush=True)
 
@@ -562,13 +629,12 @@ def main():
                 pass
 
             metrics = {
-                "train_loss": total_loss / max(1, steps),
-                "train_steps_with_loss": steps,
+                "train_loss": total_loss / max(1, steps_with_loss),
+                "train_steps_with_loss": steps_with_loss,
                 "train_runtime_sec": time.time() - start_time,
             }
             print("TRAIN METRICS:", metrics, flush=True)
 
-    # Clean shutdown
     dist.barrier()
     dist.destroy_process_group()
 
