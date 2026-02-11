@@ -3,7 +3,7 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 import deepspeed
 from deepspeed.pipe import PipelineModule
-
+import os
 
 # -------------------------
 # Dataset
@@ -33,6 +33,34 @@ in_features = 1
 hidden_dim = 10
 out_features = 1
 
+def env_default(dst: str, src: str):
+    # Only set dst from src if src exists (avoid KeyError outside Slurm)
+    if dst not in os.environ and src in os.environ:
+        os.environ[dst] = os.environ[src]
+
+
+env_default("RANK", "SLURM_PROCID")
+env_default("WORLD_SIZE", "SLURM_NTASKS")
+env_default("LOCAL_RANK", "SLURM_LOCALID")
+
+def debug_dist_state(tag=""):
+    import socket
+    import torch.distributed as dist
+
+    hostname = socket.gethostname()
+    env_keys = [
+        "RANK", "LOCAL_RANK", "WORLD_SIZE",
+        "SLURM_PROCID", "SLURM_LOCALID", "SLURM_NTASKS",
+        "MASTER_ADDR", "MASTER_PORT",
+    ]
+    env = {k: os.environ.get(k, None) for k in env_keys}
+    print(f"\n[{tag}] HOST={hostname} PID={os.getpid()} ENV={env}", flush=True)
+    print(f"[{tag}] dist_available={dist.is_available()} initialized={dist.is_initialized()}", flush=True)
+    if dist.is_initialized():
+        print(
+            f"[{tag}] RANK={dist.get_rank()} WORLD_SIZE={dist.get_world_size()} BACKEND={dist.get_backend()}",
+            flush=True,
+        )
 
 # -------------------------
 # Main
@@ -46,6 +74,7 @@ def main():
         nn.ReLU(),
         nn.Linear(hidden_dim, out_features),
     ]
+    deepspeed.init_distributed(dist_backend="nccl")
 
     pipe = PipelineModule(
         layers=layers,
@@ -75,6 +104,7 @@ def main():
         model_parameters=pipe.parameters(),
         config=ds_config,
     )
+    debug_dist_state()
 
     train_loader = make_dataloader(batch_size=32)
     train_iter = iter(train_loader)

@@ -33,19 +33,13 @@ export TRITON_CACHE_DIR=$PWD/triton_cache/$SLURM_JOB_ID
 mkdir -p "$TRITON_CACHE_DIR"
 
 # --------------------
-# torch.distributed rendezvous (Slurm provides ranks)
+# Rendezvous
 # --------------------
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 
-echo "Nodes: $(scontrol show hostnames "$SLURM_JOB_NODELIST")"
-echo "MASTER_ADDR=$MASTER_ADDR"
-echo "MASTER_PORT=$MASTER_PORT"
-echo "NNODES=$SLURM_JOB_NUM_NODES"
-echo "NTASKS=$SLURM_NTASKS"
-
 # --------------------
-# Launch (IMPORTANT: no torchrun, no deepspeed launcher)
+# Launch (NO torchrun, NO deepspeed launcher)
 # --------------------
 srun --cpu-bind=none \
   python scripts/run_clm_gpt2_pipeline_parallel.py \
