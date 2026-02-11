@@ -8,3 +8,4 @@ utils_scripts
 huggingface
 triton_cache
 out-gpt2-pp
+.vscode
