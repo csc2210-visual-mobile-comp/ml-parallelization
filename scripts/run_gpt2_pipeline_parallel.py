@@ -824,8 +824,7 @@ def main():
         print("Train loader len", len(train_loader))
         for epoch in range(int(training_args.num_train_epochs)):
             data_iter = iter(train_loader)
-            step = 0
-            for i in range(len(train_loader)):
+            for step in range(len(train_loader)):
                 if epoch in epochs_to_profile and step == steps_to_profile[0]:
                     prof.start()
                 loss = engine.train_batch(data_iter=data_iter)
