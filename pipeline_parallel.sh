@@ -1,4 +1,4 @@
-deepspeed --num_gpus=2 scripts/run_gpt2_basic.py \
+deepspeed --num_gpus=2 scripts/run_gpt2_pipeline_parallel.py \
     --model_name_or_path gpt2 \
   --train_file shakespeare.txt \
   --do_train \

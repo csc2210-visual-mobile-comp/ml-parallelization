@@ -813,20 +813,46 @@ def main():
         
         total_loss = 0.0
         steps_with_loss = 0
+        prof = torch.profiler.profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler"),
+            record_shapes=True,
+            profile_memory=True,
+        )
+        epochs_to_profile = [0,1]
+        steps_to_profile = [10, 12]
+        for epoch in range(training_args.num_train_epochs):
+            data_iter = iter(train_loader)
 
-        for step in range(1):
-            loss = engine.train_batch(data_iter=data_iter)
+            for step in range(len(train_loader)):
+            
+                # Start profiling only for epoch 0 and 1 (epoch 1 & 2 human count)
+                if epoch in [epochs_to_profile] and step == steps_to_profile[0]:
+                    prof.start()
 
-            if loss is not None:   # only last stage
-                total_loss += float(loss)
-                steps_with_loss += 1
+                loss = engine.train_batch(data_iter=data_iter)
 
-            if training_args.logging_steps and step % training_args.logging_steps == 0:
-                if engine.global_rank == 0:
-                    print(
-                        f"step={step} avg_loss={total_loss / max(1, steps_with_loss):.4f}",
-                        flush=True,
-                    )
+                # Only step profiler while active
+                if prof.profiler is not None:
+                    try:
+                        prof.step()
+                    except:
+                        pass
+                    
+                if epoch in epochs_to_profile and step == steps_to_profile[1]:
+                    prof.stop()
+
+                if loss is not None:
+                    total_loss += float(loss)
+                    steps_with_loss += 1
+
+                if training_args.logging_steps and step % training_args.logging_steps == 0:
+                    if engine.global_rank == 0:
+                        print(
+                            f"epoch={epoch} step={step} "
+                            f"avg_loss={total_loss / max(1, steps_with_loss):.4f}",
+                            flush=True,
+                        )
 
         engine.save_checkpoint(training_args.output_dir)
 
