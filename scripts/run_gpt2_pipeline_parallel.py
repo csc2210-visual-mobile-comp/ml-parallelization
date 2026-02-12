@@ -827,7 +827,7 @@ def main():
             for step in range(len(train_loader)):
             
                 # Start profiling only for epoch 0 and 1 (epoch 1 & 2 human count)
-                if epoch in [epochs_to_profile] and step == steps_to_profile[0]:
+                if epoch in epochs_to_profile and step == steps_to_profile[0]:
                     prof.start()
 
                 loss = engine.train_batch(data_iter=data_iter)
