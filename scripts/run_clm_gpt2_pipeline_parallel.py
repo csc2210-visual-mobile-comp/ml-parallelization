@@ -66,7 +66,102 @@ from transformers import (
 from transformers.testing_utils import CaptureLogger
 from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from deepspeed.pipe import PipelineModule, LayerSpec
+from transformers import default_data_collator
+import deepspeed
+import json
+from torch.utils.data import DataLoader
 
+def make_gpt2_pipeline_module(hf_model, num_stages: int, tie_embeddings: bool = True):
+    gpt2 = hf_model.transformer
+
+    if tie_embeddings:
+        try:
+            hf_model.lm_head.weight = gpt2.wte.weight
+        except Exception:
+            pass
+
+    blocks = list(gpt2.h)
+
+    class GPT2ShiftedCELoss(nn.Module):
+        def __init__(self, ignore_index=-100):
+            super().__init__()
+            self.ignore_index = ignore_index
+
+        def forward(self, logits, labels):
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            return F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=self.ignore_index,
+            )
+
+    class Embeddings(nn.Module):
+        def __init__(self, wte, wpe, drop):
+            super().__init__()
+            self.wte = wte
+            self.wpe = wpe
+            self.drop = drop
+
+        def forward(self, inputs):
+            input_ids, attention_mask = inputs
+            bsz, seqlen = input_ids.shape
+            device = input_ids.device
+
+            pos = torch.arange(seqlen, device=device).unsqueeze(0).expand(bsz, -1)
+            h = self.wte(input_ids) + self.wpe(pos)
+            h = self.drop(h)
+
+            # Attach mask to h so later stages can access it
+            h.attention_mask = attention_mask
+            return h
+
+    class BlockWrapper(nn.Module):
+        def __init__(self, block):
+            super().__init__()
+            self.block = block
+
+        def forward(self, h):
+            attention_mask = getattr(h, "attention_mask", None)
+
+            if attention_mask is not None:
+                attn = attention_mask.to(dtype=h.dtype)
+                attn_4d = (1.0 - attn) * (-1e4)
+                attn_4d = attn_4d[:, None, None, :]
+            else:
+                attn_4d = None
+
+            h = self.block(h, attention_mask=attn_4d, use_cache=False)[0]
+            h.attention_mask = attention_mask
+            return h
+
+    class Finalize(nn.Module):
+        def __init__(self, ln_f, lm_head):
+            super().__init__()
+            self.ln_f = ln_f
+            self.lm_head = lm_head
+
+        def forward(self, h):
+            h = self.ln_f(h)
+            logits = self.lm_head(h)
+            return logits
+
+    layers = [LayerSpec(Embeddings, gpt2.wte, gpt2.wpe, gpt2.drop)]
+    for blk in blocks:
+        layers.append(LayerSpec(BlockWrapper, blk))
+    layers.append(LayerSpec(Finalize, gpt2.ln_f, hf_model.lm_head))
+
+    return PipelineModule(
+        layers=layers,
+        loss_fn=GPT2ShiftedCELoss(ignore_index=-100),
+        num_stages=num_stages,
+        partition_method="parameters",
+        activation_checkpoint_interval=1,
+    )
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.57.0.dev0")
@@ -74,6 +169,17 @@ check_min_version("4.57.0.dev0")
 require_version("datasets>=2.14.0", "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt")
 
 logger = logging.getLogger(__name__)
+
+
+def env_default(dst: str, src: str):
+    # Only set dst from src if src exists (avoid KeyError outside Slurm)
+    if dst not in os.environ and src in os.environ:
+        os.environ[dst] = os.environ[src]
+
+
+env_default("RANK", "SLURM_PROCID")
+env_default("WORLD_SIZE", "SLURM_NTASKS")
+env_default("LOCAL_RANK", "SLURM_LOCALID")
 
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
@@ -703,20 +809,9 @@ def main():
             preds = preds[:, :-1].reshape(-1)
             return metric.compute(predictions=preds, references=labels)
 
-    # Initialize our Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
-        processing_class=tokenizer,
-        # Data collator will default to DataCollatorWithPadding, so we change it.
-        data_collator=default_data_collator,
-        compute_metrics=compute_metrics if training_args.do_eval and not is_torch_xla_available() else None,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics
-        if training_args.do_eval and not is_torch_xla_available()
-        else None,
-    )
+    deepspeed.init_distributed(dist_backend="nccl", init_method="env://")
+    ds_cfg = json.load(open(training_args.deepspeed))
+    pipe_model = make_gpt2_pipeline_module(model, num_stages=ds_cfg["pipeline"]["stages"])
     debug_dist_state()
 
     # Training
@@ -732,52 +827,99 @@ def main():
             record_shapes=True,
             profile_memory=True,
         )
-        trainer.add_callback(FirstNBatchesEveryEpochProfiler(prof))
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
-        try:
-            prof.stop()
-        except Exception:
-            pass
+
+
+        # ------------------------------------------------------------
+        # DeepSpeed initialize (PipelineEngine)
+        # ------------------------------------------------------------
+        engine, optimizer, _, _ = deepspeed.initialize(
+            model=pipe_model,
+            model_parameters=[p for p in pipe_model.parameters() if p.requires_grad],
+            config=training_args.deepspeed,
+        )
+        def pp_collate(features):
+            batch = default_data_collator(features)
+            input_ids = batch["input_ids"].to(torch.long)
+            attention_mask = batch.get("attention_mask", torch.ones_like(input_ids)).to(torch.long)
+            labels = batch.get("labels", input_ids.clone()).to(torch.long)
+            return ((input_ids, attention_mask), labels)
+
+        engine.train()
+        train_loader = DataLoader(
+                train_dataset,
+                batch_size=training_args.per_device_train_batch_size,
+                shuffle=True,
+                collate_fn=pp_collate,
+                drop_last=True,
+            )
+        data_iter = iter(train_loader)
         
+        total_loss = 0.0
+        steps_with_loss = 0
+
+        for step in range(20):
+            loss = engine.train_batch(data_iter=data_iter)
+
+            if loss is not None:   # only last stage
+                total_loss += float(loss)
+                steps_with_loss += 1
+
+            if training_args.logging_steps and step % training_args.logging_steps == 0:
+                if engine.global_rank == 0:
+                    print(
+                        f"step={step} avg_loss={total_loss / max(1, steps_with_loss):.4f}",
+                        flush=True,
+                    )
+
+
+        # ------------------------------------------------------------
+        # Save checkpoint (each stage saves shard)
+        # ------------------------------------------------------------
+        engine.save_checkpoint(training_args.output_dir)
+
+        if engine.global_rank == 0:
+            tokenizer.save_pretrained(training_args.output_dir)
+            model.config.save_pretrained(training_args.output_dir)
+
+
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.barrier()
             torch.distributed.destroy_process_group()
 
-        metrics = train_result.metrics
+        # metrics = train_result.metrics
 
         max_train_samples = (
             data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
         )
-        if data_args.streaming:
-            metrics["train_samples"] = max_train_samples
-        else:
-            metrics["train_samples"] = min(max_train_samples, len(train_dataset))
+        # if data_args.streaming:
+        #     metrics["train_samples"] = max_train_samples
+        # else:
+        #     metrics["train_samples"] = min(max_train_samples, len(train_dataset))
 
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
+        # trainer.log_metrics("train", metrics)
+        # trainer.save_metrics("train", metrics)
+        # trainer.save_state()
 
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        metrics = trainer.evaluate()
+        # metrics = trainer.evaluate()
 
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
-        if data_args.streaming:
-            metrics["eval_samples"] = max_eval_samples
-        else:
-            metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+        # if data_args.streaming:
+        #     metrics["eval_samples"] = max_eval_samples
+        # else:
+        #     metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
-        try:
-            perplexity = math.exp(metrics["eval_loss"])
-        except OverflowError:
-            perplexity = float("inf")
-        metrics["perplexity"] = perplexity
+        # try:
+        #     perplexity = math.exp(metrics["eval_loss"])
+        # except OverflowError:
+        #     perplexity = float("inf")
+        # metrics["perplexity"] = perplexity
 
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
+        # trainer.log_metrics("eval", metrics)
+        # trainer.save_metrics("eval", metrics)
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-generation"}
     if data_args.dataset_name is not None:
@@ -788,10 +930,10 @@ def main():
         else:
             kwargs["dataset"] = data_args.dataset_name
 
-    if training_args.push_to_hub:
-        trainer.push_to_hub(**kwargs)
-    else:
-        trainer.create_model_card(**kwargs)
+    # if training_args.push_to_hub:
+    #     trainer.push_to_hub(**kwargs)
+    # else:
+    #     trainer.create_model_card(**kwargs)
 
 
 def _mp_fn(index):

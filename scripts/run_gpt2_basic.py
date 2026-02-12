@@ -773,8 +773,7 @@ def main():
             labels = labels[:, 1:].reshape(-1)
             preds = preds[:, :-1].reshape(-1)
             return metric.compute(predictions=preds, references=labels)
-        
-    # deepspeed.init_distributed(dist_backend="gloo", init_method="env://")
+
     ds_cfg = json.load(open(training_args.deepspeed))
     pipe_model = make_gpt2_pipeline_module(model, num_stages=ds_cfg["pipeline"]["stages"])
 
@@ -818,8 +817,27 @@ def main():
         for step in range(1):
             loss = engine.train_batch(data_iter=data_iter)
 
-            if engine.global_rank == 0:
-                print("loss:", loss)
+            if loss is not None:   # only last stage
+                total_loss += float(loss)
+                steps_with_loss += 1
+
+            if training_args.logging_steps and step % training_args.logging_steps == 0:
+                if engine.global_rank == 0:
+                    print(
+                        f"step={step} avg_loss={total_loss / max(1, steps_with_loss):.4f}",
+                        flush=True,
+                    )
+
+        engine.save_checkpoint(training_args.output_dir)
+
+        if engine.global_rank == 0:
+            tokenizer.save_pretrained(training_args.output_dir)
+            model.config.save_pretrained(training_args.output_dir)
+
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+            torch.distributed.destroy_process_group()
 
 if __name__ == "__main__":
     main()
