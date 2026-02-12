@@ -788,14 +788,7 @@ def main():
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
-        prof = torch.profiler.profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            schedule=torch.profiler.schedule(wait=0, warmup=0, active=999),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(data_args.profiler_path),
-            record_shapes=True,
-            profile_memory=True,
-        )
-        
+
         engine, optimizer, _, _ = deepspeed.initialize(
             model=pipe_model,
             model_parameters=[p for p in pipe_model.parameters() if p.requires_grad],
@@ -822,7 +815,7 @@ def main():
         steps_with_loss = 0
         prof = torch.profiler.profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler"),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(data_args.profiler_path),
             record_shapes=True,
             profile_memory=True,
         )
