@@ -7,11 +7,7 @@
   },
 
   "zero_optimization": {
-    "stage": 2,
-    "overlap_comm": true,
-    "contiguous_gradients": true,
-    "reduce_bucket_size": 2.5e7,
-    "allgather_bucket_size": 2.5e7
+    "stage": 1
   },
 
   "pipeline": {
