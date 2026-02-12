@@ -10,4 +10,5 @@ deepspeed --num_gpus=2 scripts/run_gpt2_deepspeed_cli.py \
   --logging_steps 10 \
   --deepspeed runs/pipeline_parallel.json \
   --output_dir out-gpt2-pp \
+  --profiler_path ./profiler_pipeline_parallel \
   --overwrite_output_dir

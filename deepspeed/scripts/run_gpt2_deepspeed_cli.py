@@ -368,6 +368,10 @@ class DataTrainingArguments:
     keep_linebreaks: bool = field(
         default=True, metadata={"help": "Whether to keep line breaks when using TXT files or not."}
     )
+    profiler_path: str = field(
+        default="./profiler",
+        metadata={"help": "Profiler path"}
+    )
 
     def __post_init__(self):
         if self.streaming:
@@ -787,7 +791,7 @@ def main():
         prof = torch.profiler.profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             schedule=torch.profiler.schedule(wait=0, warmup=0, active=999),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler"),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(training_args.profiler_path),
             record_shapes=True,
             profile_memory=True,
         )
