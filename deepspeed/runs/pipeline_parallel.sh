@@ -8,6 +8,6 @@ deepspeed --num_gpus=2 scripts/run_gpt2_deepspeed_cli.py \
   --num_train_epochs 2 \
   --fp16 \
   --logging_steps 10 \
-  --deepspeed configs/pipeline_parallel.json \
+  --deepspeed runs/pipeline_parallel.json \
   --output_dir out-gpt2-pp \
   --overwrite_output_dir

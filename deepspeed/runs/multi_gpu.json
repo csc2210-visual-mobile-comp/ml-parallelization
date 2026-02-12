@@ -10,6 +10,11 @@
     "stage": 0
   },
 
+  "pipeline": {
+    "enabled": false,
+    "stages": 0
+  },
+
   "optimizer": {
     "type": "AdamW",
     "params": {

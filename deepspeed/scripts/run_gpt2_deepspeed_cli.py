@@ -775,7 +775,10 @@ def main():
             return metric.compute(predictions=preds, references=labels)
 
     ds_cfg = json.load(open(training_args.deepspeed))
-    pipe_model = make_gpt2_pipeline_module(model, num_stages=ds_cfg["pipeline"]["stages"])
+    if ds_cfg["pipeline"]["enabled"]:
+        pipe_model = make_gpt2_pipeline_module(model, num_stages=ds_cfg["pipeline"]["stages"])
+    else:
+        pipe_model = model
 
     if training_args.do_train:
         checkpoint = None
