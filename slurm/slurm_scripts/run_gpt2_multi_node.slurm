@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --nodelist=gpunode32,gpunode33
 #SBATCH --cpus-per-task=8
-#SBATCH --time=00:20:00
+#SBATCH --time=00:10:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
