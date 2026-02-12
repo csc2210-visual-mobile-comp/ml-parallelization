@@ -1,21 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=gpt2-shakespeare-pp
+#SBATCH --job-name=gpt2-shakespeare-dp
 #SBATCH --partition=gpunodes
 #SBATCH --nodes=2
+#SBATCH --ntasks=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:1
+#SBATCH --nodelist=gpunode32,gpunode33
 #SBATCH --cpus-per-task=8
 #SBATCH --time=01:00:00
 #SBATCH --output=logs/%x-%j.out
 #SBATCH --error=logs/%x-%j.err
 
-set -euo pipefail
-
-mkdir -p logs
-
-# --------------------
-# Environment
-# --------------------
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
@@ -23,26 +18,27 @@ export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=INFO
 export NCCL_IB_DISABLE=1
 export NCCL_SOCKET_IFNAME=^lo,docker
-export NCCL_ASYNC_ERROR_HANDLING=1
 
 export HF_HOME=$PWD/huggingface/home
 export HF_DATASETS_CACHE=$PWD/huggingface/datasets
 export TRANSFORMERS_CACHE=$PWD/huggingface/models
 
 export TRITON_CACHE_DIR=$PWD/triton_cache/$SLURM_JOB_ID
-mkdir -p "$TRITON_CACHE_DIR"
+mkdir -p $TRITON_CACHE_DIR
 
-# --------------------
-# Rendezvous
-# --------------------
-export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
+MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
+MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 
-# --------------------
-# Launch (NO torchrun, NO deepspeed launcher)
-# --------------------
-srun --cpu-bind=none \
-  python scripts/run_clm_gpt2_pipeline_parallel.py \
+echo "Nodes: $(scontrol show hostnames "$SLURM_JOB_NODELIST")"
+echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
+echo "SLURM_NTASKS=$SLURM_NTASKS SLURM_JOB_NUM_NODES=$SLURM_JOB_NUM_NODES"
+
+srun --label torchrun \
+  --nnodes=$SLURM_JOB_NUM_NODES \
+  --nproc_per_node=1 \
+  --rdzv_backend=c10d \
+  --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+  scripts/run_clm.py \
   --model_name_or_path gpt2-large \
   --train_file shakespeare.txt \
   --do_train \
@@ -50,8 +46,9 @@ srun --cpu-bind=none \
   --per_device_train_batch_size 2 \
   --learning_rate 5e-5 \
   --num_train_epochs 2 \
+  --weight_decay 0.01 \
   --fp16 \
-  --logging_steps 10 \
-  --deepspeed configs/pipeline_parallel.json \
-  --output_dir out-gpt2-pp \
+  --logging_steps 50 \
+  --deepspeed configs/zero_opt_torchrun.json \
+  --output_dir out-gpt2-dp \
   --overwrite_output_dir

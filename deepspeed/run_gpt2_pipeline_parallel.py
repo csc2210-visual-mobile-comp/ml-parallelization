@@ -8,7 +8,7 @@ from itertools import chain
 import datasets
 import evaluate
 import torch
-from torch.profiler import profile, record_function, ProfilerActivity
+from torch.profiler import ProfilerActivity
 from transformers import TrainerCallback
 from datasets import IterableDataset, IterableDatasetDict, load_dataset
 
