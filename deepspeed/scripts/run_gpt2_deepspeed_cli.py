@@ -791,7 +791,7 @@ def main():
         prof = torch.profiler.profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             schedule=torch.profiler.schedule(wait=0, warmup=0, active=999),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(training_args.profiler_path),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(data_args.profiler_path),
             record_shapes=True,
             profile_memory=True,
         )
