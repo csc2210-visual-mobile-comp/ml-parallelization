@@ -821,7 +821,7 @@ def main():
         )
         epochs_to_profile = [0,1]
         steps_to_profile = [10, 12]
-        for epoch in range(training_args.num_train_epochs):
+        for epoch in range(int(training_args.num_train_epochs)):
             data_iter = iter(train_loader)
 
             for step in range(len(train_loader)):
