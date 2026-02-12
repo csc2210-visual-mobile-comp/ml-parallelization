@@ -45,8 +45,6 @@ from itertools import chain
 import datasets
 import evaluate
 import torch
-from torch.profiler import profile, record_function, ProfilerActivity
-from transformers import TrainerCallback
 from datasets import IterableDataset, IterableDatasetDict, load_dataset
 
 import transformers
@@ -78,79 +76,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_CAUSAL_LM_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
-
-def debug_dist_state(tag=""):
-    import os
-    import socket
-    import torch.distributed as dist
-
-    hostname = socket.gethostname()
-
-    env_keys = [
-        "RANK", "LOCAL_RANK", "WORLD_SIZE",
-        "SLURM_PROCID", "SLURM_LOCALID", "SLURM_NTASKS",
-        "MASTER_ADDR", "MASTER_PORT",
-    ]
-
-    env = {k: os.environ.get(k, None) for k in env_keys}
-
-    print(
-        f"\n[{tag}] HOST={hostname} "
-        f"PID={os.getpid()} "
-        f"ENV={env}",
-        flush=True,
-    )
-
-    if dist.is_available():
-        print(
-            f"[{tag}] torch.distributed available=True "
-            f"initialized={dist.is_initialized()}",
-            flush=True,
-        )
-        if dist.is_initialized():
-            print(
-                f"[{tag}] RANK={dist.get_rank()} "
-                f"WORLD_SIZE={dist.get_world_size()} "
-                f"BACKEND={dist.get_backend()}",
-                flush=True,
-            )
-    else:
-        print(f"[{tag}] torch.distributed available=False", flush=True)
-
-
-class FirstNBatchesEveryEpochProfiler(TrainerCallback):
-    def __init__(self, profiler, start_batch=10, end_batch=12):
-        self.profiler = profiler
-        self.start_batch = start_batch
-        self.end_batch = end_batch
-        self.step_in_epoch = 0
-        self.enabled = False
-
-    def on_epoch_begin(self, args, state, control, **kwargs):
-        self.step_in_epoch = 0
-        self.enabled = False
-
-    def on_step_end(self, args, state, control, **kwargs):
-        self.step_in_epoch += 1
-
-        # Start profiler at batch 1
-        if self.step_in_epoch == self.start_batch:
-            self.profiler.start()
-            self.enabled = True
-
-        if self.enabled:
-            self.profiler.step()
-
-        # Stop profiler after batch 5
-        if self.step_in_epoch == self.end_batch:
-            self.profiler.stop()
-            self.enabled = False
-
-    def on_epoch_end(self, args, state, control, **kwargs):
-        # Safety stop (in case epoch is shorter)
-        if self.enabled:
-            self.profiler.stop()
-            self.enabled = False
 
 
 @dataclass
@@ -717,32 +642,14 @@ def main():
         if training_args.do_eval and not is_torch_xla_available()
         else None,
     )
-    debug_dist_state()
 
     # Training
     if training_args.do_train:
         checkpoint = None
         if training_args.resume_from_checkpoint is not None:
             checkpoint = training_args.resume_from_checkpoint
-
-        prof = torch.profiler.profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            schedule=torch.profiler.schedule(wait=0, warmup=0, active=999),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler("./profiler"),
-            record_shapes=True,
-            profile_memory=True,
-        )
-        trainer.add_callback(FirstNBatchesEveryEpochProfiler(prof))
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
-        try:
-            prof.stop()
-        except Exception:
-            pass
-        
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.barrier()
-            torch.distributed.destroy_process_group()
 
         metrics = train_result.metrics
 
