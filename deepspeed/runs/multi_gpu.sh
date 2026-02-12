@@ -1,4 +1,4 @@
-deepspeed --num_gpus=2 scripts/run_gpt2_pipeline_parallel.py \
+deepspeed --num_gpus=2 scripts/run_gpt2_deepspeed_cli.py \
     --model_name_or_path gpt2 \
   --train_file shakespeare.txt \
   --do_train \
@@ -8,6 +8,6 @@ deepspeed --num_gpus=2 scripts/run_gpt2_pipeline_parallel.py \
   --num_train_epochs 2 \
   --fp16 \
   --logging_steps 10 \
-  --deepspeed configs/pipeline_parallel.json \
+  --deepspeed configs/multi_gpu.json \
   --output_dir out-gpt2-pp \
   --overwrite_output_dir
