@@ -821,35 +821,27 @@ def main():
         )
         epochs_to_profile = [0,1]
         steps_to_profile = [10, 12]
+        print("Train loader len", len(train_loader))
         for epoch in range(int(training_args.num_train_epochs)):
             data_iter = iter(train_loader)
             step = 0
-            while True:
-                try:
-                    if epoch in epochs_to_profile and step == steps_to_profile[0]:
-                        prof.start()
+            for i in range(len(train_loader)):
+                if epoch in epochs_to_profile and step == steps_to_profile[0]:
+                    prof.start()
+                loss = engine.train_batch(data_iter=data_iter)
+                if epoch in epochs_to_profile and step == steps_to_profile[1]:
+                    prof.stop()
+                if loss is not None:
+                    total_loss += float(loss)
+                    steps_with_loss += 1
+                if training_args.logging_steps and step % training_args.logging_steps == 0:
+                    if engine.global_rank == 0:
+                        print(
+                            f"epoch={epoch} step={step} "
+                            f"avg_loss={total_loss / max(1, steps_with_loss):.4f}",
+                            flush=True,
+                        )
 
-                    loss = engine.train_batch(data_iter=data_iter)
-
-                    if epoch in epochs_to_profile and step == steps_to_profile[1]:
-                        prof.stop()
-
-                    if loss is not None:
-                        total_loss += float(loss)
-                        steps_with_loss += 1
-
-                    if training_args.logging_steps and step % training_args.logging_steps == 0:
-                        if engine.global_rank == 0:
-                            print(
-                                f"epoch={epoch} step={step} "
-                                f"avg_loss={total_loss / max(1, steps_with_loss):.4f}",
-                                flush=True,
-                            )
-
-                    step += 1
-
-                except StopIteration:
-                    break
 
         engine.save_checkpoint(training_args.output_dir)
 
