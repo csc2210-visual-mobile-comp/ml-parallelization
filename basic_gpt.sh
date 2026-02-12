@@ -1,0 +1,13 @@
+deepspeed scripts/run_gpt2_basic.py \
+    --model_name_or_path gpt2 \
+  --train_file shakespeare.txt \
+  --do_train \
+  --block_size 512 \
+  --per_device_train_batch_size 2 \
+  --learning_rate 5e-5 \
+  --num_train_epochs 2 \
+  --fp16 \
+  --logging_steps 10 \
+  --deepspeed configs/basic_gpt.json \
+  --output_dir out-gpt2-pp \
+  --overwrite_output_dir
