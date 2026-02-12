@@ -42,6 +42,7 @@ srun --label torchrun \
   --model_name_or_path gpt2 \
   --train_file shakespeare.txt \
   --do_train \
+  --profiler_path profiler/multi_node \
   --block_size 512 \
   --per_device_train_batch_size 2 \
   --learning_rate 5e-5 \
