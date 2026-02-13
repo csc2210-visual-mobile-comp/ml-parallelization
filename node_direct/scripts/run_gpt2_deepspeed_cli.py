@@ -858,11 +858,11 @@ def main():
 
         prof.stop()
 
-        engine.save_checkpoint(training_args.output_dir)
+        # engine.save_checkpoint(training_args.output_dir)
 
-        if engine.global_rank == 0:
-            tokenizer.save_pretrained(training_args.output_dir)
-            model.config.save_pretrained(training_args.output_dir)
+        # if engine.global_rank == 0:
+        #     tokenizer.save_pretrained(training_args.output_dir)
+        #     model.config.save_pretrained(training_args.output_dir)
 
 
         if torch.distributed.is_available() and torch.distributed.is_initialized():
