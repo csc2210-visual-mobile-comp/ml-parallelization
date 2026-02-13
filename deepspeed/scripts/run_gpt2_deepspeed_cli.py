@@ -813,27 +813,42 @@ def main():
         
         total_loss = 0.0
         steps_with_loss = 0
+
         prof = torch.profiler.profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(data_args.profiler_path),
+            schedule=torch.profiler.schedule(
+                wait=0,
+                warmup=0,
+                active=999,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                data_args.profiler_path
+            ),
             record_shapes=True,
             profile_memory=True,
         )
-        epochs_to_profile = [0,1]
-        steps_to_profile = [10, 12]
+    
+        prof.start()
+
         print("Train loader len", len(train_loader))
+
         for epoch in range(int(training_args.num_train_epochs)):
             data_iter = iter(train_loader)
+
             for step in range(len(train_loader) // ds_cfg["gradient_accumulation_steps"]):
-                if epoch in epochs_to_profile and step == steps_to_profile[0]:
-                    prof.start()
+            
                 loss = engine.train_batch(data_iter=data_iter)
-                if epoch in epochs_to_profile and step == steps_to_profile[1]:
-                    prof.stop()
+
+                prof.step()
+
                 if loss is not None:
                     total_loss += float(loss)
                     steps_with_loss += 1
-                if training_args.logging_steps and step % training_args.logging_steps == 0:
+
+                if (
+                    training_args.logging_steps
+                    and step % training_args.logging_steps == 0
+                ):
                     if engine.global_rank == 0:
                         print(
                             f"epoch={epoch} step={step} "
@@ -841,6 +856,7 @@ def main():
                             flush=True,
                         )
 
+        prof.stop()
 
         engine.save_checkpoint(training_args.output_dir)
 
