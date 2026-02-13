@@ -11,7 +11,7 @@ deepspeed --num_gpus=2 scripts/run_gpt2_deepspeed_cli.py \
   --num_train_epochs 2 \
   --fp16 \
   --logging_steps 10 \
-  --deepspeed runs/multi_gpu.json \
+  --deepspeed runs/multi_gpu_deepspeed.json \
   --output_dir out-gpt2-pp \
   --profiler_path ./profiler_multi_gpu \
   --overwrite_output_dir
