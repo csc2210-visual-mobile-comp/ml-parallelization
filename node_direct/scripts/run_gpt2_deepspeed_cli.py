@@ -828,23 +828,32 @@ def main():
             profile_memory=True,
         )
     
-        prof.start()
-
-        print("Train loader len", len(train_loader))
-
         for epoch in range(int(training_args.num_train_epochs)):
             data_iter = iter(train_loader)
-
+            profiler_enabled = False
+        
             for step in range(len(train_loader) // ds_cfg["gradient_accumulation_steps"]):
             
+                # Start profiler at step 10
+                if step == 10:
+                    prof.start()
+                    profiler_enabled = True
+        
                 loss = engine.train_batch(data_iter=data_iter)
-
-                prof.step()
-
+        
+                # Step profiler only while active
+                if profiler_enabled:
+                    prof.step()
+        
+                # Stop profiler at step 12
+                if step == 12 and profiler_enabled:
+                    prof.stop()
+                    profiler_enabled = False
+        
                 if loss is not None:
                     total_loss += float(loss)
                     steps_with_loss += 1
-
+        
                 if (
                     training_args.logging_steps
                     and step % training_args.logging_steps == 0
@@ -855,8 +864,10 @@ def main():
                             f"avg_loss={total_loss / max(1, steps_with_loss):.4f}",
                             flush=True,
                         )
-
-        prof.stop()
+        
+            # Safety stop in case epoch shorter than 12
+            if profiler_enabled:
+                prof.stop()
 
         # engine.save_checkpoint(training_args.output_dir)
 
